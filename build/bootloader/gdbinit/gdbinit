@@ -1,0 +1,2 @@
+source C:/RJ/Coding/newESP/build/bootloader/gdbinit/symbols
+source C:/RJ/Coding/newESP/build/bootloader/gdbinit/connect
