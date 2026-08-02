@@ -70,12 +70,12 @@ bool initCamera() {
     config.pin_sscb_scl = SIOC_GPIO_NUM;
     config.pin_pwdn     = PWDN_GPIO_NUM;
     config.pin_reset    = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 10000000; // CRITICAL TEST: Dropping to 10MHz to see if the signal survives the FPC connector
+    config.xclk_freq_hz = 20000000; // 20MHz XCLK for higher sensor FPS (was 10MHz during FPC signal test)
     
     // Hardware JPEG Compression for max FPS
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size   = FRAMESIZE_VGA; 
-    config.jpeg_quality = 12; 
+    config.jpeg_quality = 20; // Relaxed quality (was 12) → smaller frames → higher effective FPS over WiFi
     
     config.fb_count     = 2; 
     config.fb_location  = CAMERA_FB_IN_DRAM; // CRITICAL: Use internal SRAM to bypass the ESP32-S3 Octal PSRAM DMA bug!
