@@ -83,6 +83,8 @@ static volatile bool led2_on    = false;
 static volatile bool blink_mode = false;
 static volatile bool buzzer_held = false;
 static volatile int ping_blink_count = 0;
+static volatile bool wifi_station_connected = false;
+static volatile bool stream_connected       = false;
 static int current_duty = 0;
 
 // ============================================================
@@ -202,8 +204,9 @@ static void led_task(void *arg) {
             gpio_set_level(LED2_GPIO, phase ? 0 : 1);
             vTaskDelay(pdMS_TO_TICKS(300));
         } else {
+            bool app_connected = wifi_station_connected || stream_connected;
             gpio_set_level(LED1_GPIO, led1_on ? 1 : 0);
-            gpio_set_level(LED2_GPIO, led2_on ? 1 : 0);
+            gpio_set_level(LED2_GPIO, (app_connected || led2_on) ? 1 : 0);
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
@@ -212,6 +215,20 @@ static void led_task(void *arg) {
 // ============================================================
 // WiFi — SoftAP
 // ============================================================
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
+        ESP_LOGI(TAG, "Station connected, AID=%d", event->aid);
+        wifi_station_connected = true;
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
+        ESP_LOGI(TAG, "Station disconnected, AID=%d", event->aid);
+        wifi_station_connected = false;
+    }
+}
+
 static void wifi_init_softap(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -219,6 +236,12 @@ static void wifi_init_softap(void) {
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
 
     wifi_config_t wifi_config = {};
     strcpy((char*)wifi_config.ap.ssid,     "FatigueSense_Cam");
@@ -250,6 +273,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     if (res != ESP_OK) return res;
 
     ESP_LOGI(TAG, "Stream connected!");
+    stream_connected = true;
 
     while (true) {
         fb = esp_camera_fb_get();
@@ -276,9 +300,11 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 
         if (res != ESP_OK) {
             ESP_LOGI(TAG, "Stream disconnected!");
+            stream_connected = false;
             break;
         }
     }
+    stream_connected = false;
     return res;
 }
 
