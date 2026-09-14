@@ -8,6 +8,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -62,6 +64,7 @@
 
 #define BUZZER_MIN_DUTY     40    // ~4% — short quiet pulses, just above oscillator threshold
 #define BUZZER_MAX_DUTY     1023  // 100% — continuous full tone
+#define YAWN_BEEP_DUTY      BUZZER_MAX_DUTY
 #define BUZZER_RAMP_MS      2500  // Time to go from min → max while held
 #define BUZZER_STEP_MS      30    // Smaller steps = smoother perceived ramp
 
@@ -82,9 +85,14 @@ static volatile bool led1_on    = false;
 static volatile bool led2_on    = false;
 static volatile bool blink_mode = false;
 static volatile bool buzzer_held = false;
+static volatile bool yawn_beep_active = false;
 static volatile int ping_blink_count = 0;
 static volatile bool wifi_station_connected = false;
 static volatile bool stream_connected       = false;
+static volatile char current_alert_type[16] = "clear";
+static volatile bool any_alert_active = false;
+static uint32_t last_alert_seq = 0;
+static uint16_t last_alert_session = 0;
 static int current_duty = 0;
 
 // ============================================================
@@ -150,10 +158,10 @@ static bool initCamera(void) {
     config.pin_reset    = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000; // 20 MHz XCLK for higher sensor FPS
 
-    // Hardware JPEG compression for max FPS
+    // Hardware JPEG compression for max FPS & clarity on OV2640
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size   = FRAMESIZE_VGA;
-    config.jpeg_quality = 20; // Relaxed quality → smaller frames → higher effective FPS over WiFi
+    config.jpeg_quality = 12; // Quality setting: 12 (balanced high FPS & detail over WiFi)
 
     config.fb_count    = 2;
     config.fb_location = CAMERA_FB_IN_DRAM; // CRITICAL: bypass ESP32-S3 Octal PSRAM DMA bug
@@ -173,18 +181,54 @@ static bool initCamera(void) {
 
 // Ramps buzzer volume up while held; drops to 0 instantly on release
 static void buzzer_task(void *arg) {
+    static const int yawn_phase_ms[] = { 200, 150, 200, 150, 200, 600 };
+    bool was_yawn_active = false;
+    int yawn_phase = 0;
+    int yawn_elapsed_ms = 0;
+
     while (1) {
         if (buzzer_held) {
+            was_yawn_active = false;
+            yawn_phase = 0;
+            yawn_elapsed_ms = 0;
             if (current_duty == 0) {
                 current_duty = BUZZER_MIN_DUTY;
             } else if (current_duty < BUZZER_MAX_DUTY) {
                 current_duty += (BUZZER_MAX_DUTY - BUZZER_MIN_DUTY) * BUZZER_STEP_MS / BUZZER_RAMP_MS;
                 if (current_duty > BUZZER_MAX_DUTY) current_duty = BUZZER_MAX_DUTY;
             }
+            ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, current_duty);
+        } else if (yawn_beep_active) {
+            if (!was_yawn_active) {
+                yawn_phase = 0;
+                yawn_elapsed_ms = 0;
+                was_yawn_active = true;
+            }
+            const bool beep_on = (yawn_phase == 0 || yawn_phase == 2 || yawn_phase == 4);
+            current_duty = beep_on ? YAWN_BEEP_DUTY : 0;
+            yawn_elapsed_ms += BUZZER_STEP_MS;
+            if (yawn_elapsed_ms >= yawn_phase_ms[yawn_phase]) {
+                yawn_elapsed_ms = 0;
+                if (yawn_phase == 5) {
+                    // MAR fatigue is a one-shot alert: stop after exactly
+                    // three beeps and wait for the next distinct command.
+                    yawn_beep_active = false;
+                    led1_on = false;
+                    any_alert_active = false;
+                    strcpy((char *)current_alert_type, "clear");
+                    yawn_phase = 0;
+                } else {
+                    yawn_phase++;
+                }
+            }
+            ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, current_duty);
         } else {
+            was_yawn_active = false;
+            yawn_phase = 0;
+            yawn_elapsed_ms = 0;
             current_duty = 0;
+            ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, 0);
         }
-        ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, current_duty);
         ledc_update_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL);
         vTaskDelay(pdMS_TO_TICKS(BUZZER_STEP_MS));
     }
@@ -206,7 +250,7 @@ static void led_task(void *arg) {
         } else {
             bool app_connected = wifi_station_connected || stream_connected;
             gpio_set_level(LED1_GPIO, led1_on ? 1 : 0);
-            gpio_set_level(LED2_GPIO, (app_connected || led2_on) ? 1 : 0);
+            gpio_set_level(LED2_GPIO, (led2_on || (app_connected && !any_alert_active)) ? 1 : 0);
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
@@ -254,9 +298,9 @@ static void wifi_init_softap(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // CRITICAL FIX: Lower WiFi TX power to prevent RF interference and brownouts on jumper wires
-    // 8 = ~2 dBm (default is 78 = 19.5 dBm)
-    esp_wifi_set_max_tx_power(8);
+    // Moderate AP transmit power for reliable phone connections.
+    // ESP-IDF units are quarter-dBm: 40 is approximately 10 dBm.
+    esp_wifi_set_max_tx_power(40);
 
     ESP_LOGI(TAG, "WiFi AP started. SSID: FatigueSense_Cam (Low Power Mode)");
 }
@@ -363,26 +407,76 @@ static esp_err_t buzzer_off_handler(httpd_req_t *req)   { buzzer_held = false; E
 
 // ── Android FatigueSense alert endpoint ──────────────────────────────────────
 // Called by Esp32AlertSender in the Android app:
-//   GET /alert?type=fatigue  → buzzer on + LED1 on  (fatigue alert)
-//   GET /alert?type=yawn     → LED2 on only         (yawn warning)
-//   GET /alert?type=clear    → all off              (alert cleared)
+//   GET /alert?type=fatigue&seq=N      → continuous buzzer + LED1
+//   GET /alert?type=yawn_fatigue&seq=N → three beeps + LED1
+//   GET /alert?type=yawn&seq=N         → LED2 only
+//   GET /alert?type=clear&seq=N        → all alert outputs off
 static esp_err_t alert_handler(httpd_req_t *req) {
-    char buf[64];
+    char buf[128];
     char type[16] = "";
+    char seq_text[16] = "";
 
     // Parse query string for "type" parameter
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
         httpd_query_key_value(buf, "type", type, sizeof(type));
+        httpd_query_key_value(buf, "seq", seq_text, sizeof(seq_text));
+    }
+
+    if (type[0] == '\0' || seq_text[0] == '\0') {
+        ESP_LOGW(TAG, "ALERT: missing type or seq");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "type and seq required");
+        return ESP_OK;
+    }
+
+    char *end = NULL;
+    unsigned long parsed_seq = strtoul(seq_text, &end, 10);
+    if (end == seq_text || *end != '\0' || parsed_seq > UINT32_MAX) {
+        ESP_LOGW(TAG, "ALERT: invalid seq='%s'", seq_text);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid seq");
+        return ESP_OK;
+    }
+
+    uint32_t incoming_seq = (uint32_t)parsed_seq;
+    uint16_t incoming_session = (uint16_t)(incoming_seq >> 16);
+    if (incoming_session != last_alert_session) {
+        last_alert_session = incoming_session;
+        last_alert_seq = 0;
+    }
+    if (incoming_seq > 0 && incoming_seq <= last_alert_seq) {
+        ESP_LOGW(TAG, "ALERT: stale seq=%" PRIu32 " (last=%" PRIu32 ")", incoming_seq, last_alert_seq);
+        httpd_resp_send(req, "stale", 5);
+        return ESP_OK;
+    }
+    last_alert_seq = incoming_seq;
+
+    if (strcmp(type, (const char *)current_alert_type) == 0) {
+        ESP_LOGI(TAG, "ALERT: heartbeat no-op type='%s' seq=%" PRIu32, type, incoming_seq);
+        httpd_resp_send(req, "ok", 2);
+        return ESP_OK;
+    }
+    if (yawn_beep_active && strcmp(type, "yawn") == 0) {
+        ESP_LOGI(TAG, "ALERT: yawn ignored while yawn_fatigue beeps are active");
+        httpd_resp_send(req, "ok", 2);
+        return ESP_OK;
     }
 
     if (strcmp(type, "fatigue") == 0) {
         buzzer_held = true;
+        yawn_beep_active = false;
         led1_on     = true;
         led2_on     = false;
         blink_mode  = false;
         ESP_LOGI(TAG, "ALERT: fatigue — buzzer ON, LED1 ON");
+    } else if (strcmp(type, "yawn_fatigue") == 0) {
+        buzzer_held = false;
+        yawn_beep_active = true;
+        led1_on     = true;
+        led2_on     = false;
+        blink_mode  = false;
+        ESP_LOGI(TAG, "ALERT: yawn_fatigue — three-beep buzzer, LED1 ON, seq=%" PRIu32, incoming_seq);
     } else if (strcmp(type, "yawn") == 0) {
         buzzer_held = false;
+        yawn_beep_active = false;
         led1_on     = false;
         led2_on     = true;
         blink_mode  = false;
@@ -392,14 +486,20 @@ static esp_err_t alert_handler(httpd_req_t *req) {
         ESP_LOGI(TAG, "ALERT: ping — blinking Green LED");
     } else if (strcmp(type, "clear") == 0) {
         buzzer_held = false;
+        yawn_beep_active = false;
         led1_on     = false;
         led2_on     = false;
         blink_mode  = false;
         ESP_LOGI(TAG, "ALERT: clear — all off");
     } else {
         ESP_LOGW(TAG, "ALERT: unknown type='%s'", type);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown alert type");
+        return ESP_OK;
     }
 
+    strncpy((char *)current_alert_type, type, sizeof(current_alert_type) - 1);
+    current_alert_type[sizeof(current_alert_type) - 1] = '\0';
+    any_alert_active = strcmp(type, "clear") != 0;
     httpd_resp_send(req, "ok", 2);
     return ESP_OK;
 }
