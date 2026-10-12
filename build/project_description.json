@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "fatiguesense_cam",
-    "project_version":    "1",
+    "project_version":    "401bb42-dirty",
     "project_path":       "C:/RJ/Coding/newESP",
     "idf_path":           "C:/esp/v5.4.4/esp-idf",
     "build_dir":          "C:/RJ/Coding/newESP/build",
@@ -1135,7 +1135,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "C:/RJ/Coding/newESP/build/esp-idf/heap/libheap.a",
-            "sources": [ "C:/esp/v5.4.4/esp-idf/components/heap/heap_caps_base.c", "C:/esp/v5.4.4/esp-idf/components/heap/heap_caps.c", "C:/esp/v5.4.4/esp-idf/components/heap/heap_caps_init.c", "C:/esp/v5.4.4/esp-idf/components/heap/multi_heap.c", "C:/esp/v5.4.4/esp-idf/components/heap/tlsf/tlsf.c", "C:/esp/v5.4.4/esp-idf/components/heap/port/memory_layout_utils.c", "C:/esp/v5.4.4/esp-idf/components/heap/port/esp32s3/memory_layout.c" ],
+            "sources": [ "C:/esp/v5.4.4/esp-idf/components/heap/heap_caps_base.c", "C:/esp/v5.4.4/esp-idf/components/heap/heap_caps.c", "C:/esp/v5.4.4/esp-idf/components/heap/heap_caps_init.c", "C:/esp/v5.4.4/esp-idf/components/heap/multi_heap.c", "C:/esp/v5.4.4/esp-idf/components/heap/tlsf/tlsf.c", "C:/esp/v5.4.4/esp-idf/components/heap/multi_heap_poisoning.c", "C:/esp/v5.4.4/esp-idf/components/heap/port/memory_layout_utils.c", "C:/esp/v5.4.4/esp-idf/components/heap/port/esp32s3/memory_layout.c" ],
             "include_dirs": [ "include", "tlsf" ]
         },
         "http_parser": {

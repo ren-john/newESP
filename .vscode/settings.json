@@ -1,6 +1,5 @@
 {
   "idf.currentSetup": "C:\\esp\\v5.4.4\\esp-idf",
-  "idf.portWin": "COM9",
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
@@ -13,5 +12,6 @@
     "--query-driver=**",
     "--compile-commands-dir=c:\\RJ\\Coding\\newESP\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.port": "COM9"
 }
